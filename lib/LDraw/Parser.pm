@@ -1,55 +1,50 @@
 package LDraw::Parser;
 
-use Moose;
+use strict;
+use warnings;
 
-has file => (
-    is => 'ro',
-    isa => 'Str',
-    required => 1,
-    documentation => 'The file to parse',
-);
+sub new {
+    my ($class, $args) = @_;
+    die "file required" unless $args->{file};
+    return bless({
+        file => $args->{file},
+        ldraw_path => $args->{ldraw_path} // '/usr/share/ldraw',
+        scale => $args->{scale} // 1,
+        mm_per_ldu => $args->{mm_per_ldu} // 0.4,
+        invert => $args->{invert} // 0,
+        debug => $args->{debug} // 0,
+        d_indent => $args->{d_indent} // 0,
+    }, $class);
+}
 
-has ldraw_path => (
-    is => 'ro',
-    isa => 'Str',
-    default => '/usr/share/ldraw',
-    documentation => 'Where to find ldraw files',
-);
+sub _getter_setter {
+    my ($self, $key, $value) = @_;
+    if ($value) {
+        $self->{$key} = $value;
+    }
+    return $self->{$key};
+}
 
-has scale => (
-    is => 'rw',
-    isa => 'Num',
-    default => 1.0,
-    documentation => 'Scale the model',
-);
+# The file to parse
+sub file { return shift->_getter_setter('file', @_); }
 
-has mm_per_ldu => (
-    is => 'rw',
-    isa => 'Num',
-    default => 0.4,
-    documentation => 'Number of mm per LDU (LDraw Unit)',
-);
+# Where to find ldraw files
+sub ldraw_path { return shift->_getter_setter('ldraw_path', @_); }
 
-has invert => (
-    is => 'rw',
-    isa => 'Bool',
-    default => 0,
-    documentation => 'Invert this part',
-);
+# Scale the model
+sub scale { return shift->_getter_setter('scale', @_); }
 
-has debug => (
-    is => 'rw',
-    isa => 'Bool',
-    default => 0,
-    documentation => 'Print debugging messages to stderr',
-);
+# Number of mm per LDU (LDraw Unit)
+sub mm_per_ldu { return shift->_getter_setter('mm_per_ldu', @_); }
 
-has d_indent => (
-    is => 'ro',
-    isa => 'Int',
-    default => 0,
-    documentation => 'Indentation for debug messages (for subfiles)',
-);
+# Invert this part
+sub invert { return shift->_getter_setter('invert', @_); }
+
+# Print debugging messages to stderr
+sub debug { return shift->_getter_setter('debug', @_); }
+
+# Indentation for debug messages (for subfiles)
+sub d_indent { return shift->_getter_setter('d_indent', @_); }
 
 use constant X => 0;
 use constant Y => 1;
