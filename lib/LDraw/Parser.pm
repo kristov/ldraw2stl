@@ -37,9 +37,33 @@ has invert => (
     documentation => 'Invert this part',
 );
 
+has debug => (
+    is => 'rw',
+    isa => 'Bool',
+    default => 0,
+    documentation => 'Print debugging messages to stderr',
+);
+
+has d_indent => (
+    is => 'ro',
+    isa => 'Int',
+    default => 0,
+    documentation => 'Indentation for debug messages (for subfiles)',
+);
+
 use constant X => 0;
 use constant Y => 1;
 use constant Z => 2;
+
+sub DEBUG {
+    my ( $self, $message, @args) = @_;
+    return if !$self->debug;
+    my $indent = " " x $self->d_indent;
+    if ( @args ) {
+        $message = sprintf($message, @args);
+    }
+    print STDERR sprintf("%s%s\n", $indent, $message);
+}
 
 sub parse {
     my ( $self ) = @_;
@@ -95,7 +119,6 @@ sub parse_line {
 
 sub parse_comment_or_meta {
     my ( $self, $rest ) = @_;
-
     my @items = split( /\s+/, $rest );
     my $first = shift @items;
 
@@ -111,6 +134,7 @@ sub handle_bfc_command {
 
     if ( $first && $first eq 'INVERTNEXT' ) {
         $self->invert( 1 );
+        $self->DEBUG('handle_bfc_command(): inverted model');
     }
 }
 
@@ -174,10 +198,13 @@ sub parse_sub_file_reference {
         return;
     }
 
+    $self->DEBUG('parse_sub_file_reference(): parsing subfile "%s" with inverted: %d', $subpart_filename, $self->invert);
     my $subparser = __PACKAGE__->new( {
         file       => $subpart_filename,
         ldraw_path => $self->ldraw_path,
         invert     => $self->invert,
+        debug      => $self->debug,
+        d_indent   => $self->d_indent + 2,
     } );
     $subparser->parse;
 

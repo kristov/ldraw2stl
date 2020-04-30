@@ -14,6 +14,7 @@ GetOptions(
     'scale=s',
     'ldrawdir=s',
     'file=s',
+    'debug',
 );
 
 if ( $opts->{help} ) {
@@ -46,6 +47,9 @@ Takes an ldraw part .dat file as input and converts it into an STL file.
         non-free package "ldraw-parts" installs to /usr/share/ldraw and that is
         the default value for this tool.
 
+    --debug
+        Print debugging messages to STDERR
+
 END
 }
 
@@ -53,6 +57,7 @@ my $parser = LDraw::Parser->new( {
     file => $opts->{file},
     $opts->{scale} ? ( scale => $opts->{scale} ) : (),
     $opts->{ldrawdir} ? ( ldraw_path => $opts->{ldrawdir} ) : (),
+    $opts->{debug} ? ( debug => 1 ) : (),
 } );
 
 $parser->parse;
