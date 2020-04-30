@@ -128,7 +128,7 @@ sub handle_bfc_command {
     my $first = shift @items;
 
     if ( $first && $first eq 'INVERTNEXT' ) {
-        $self->invert( 1 );
+        $self->invert(1);
         $self->DEBUG('handle_bfc_command(): inverted model');
     }
 }
@@ -197,7 +197,6 @@ sub parse_sub_file_reference {
     my $subparser = __PACKAGE__->new( {
         file       => $subpart_filename,
         ldraw_path => $self->ldraw_path,
-        invert     => $self->invert,
         debug      => $self->debug,
         d_indent   => $self->d_indent + 2,
     } );
@@ -210,6 +209,7 @@ sub parse_sub_file_reference {
             $vec->[1] = $new_vec[1];
             $vec->[2] = $new_vec[2];
         }
+        $triangle->[4] = [ $self->calc_surface_normal($triangle->[0], $triangle->[1], $triangle->[2]) ];
         push @{ $self->{triangles} }, $triangle;
     }
 }
