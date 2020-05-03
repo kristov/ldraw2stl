@@ -14,12 +14,13 @@ sub new {
         invert => $args->{invert} // 0,
         debug => $args->{debug} // 0,
         d_indent => $args->{d_indent} // 0,
+        _invertnext => 0,
     }, $class);
 }
 
 sub _getter_setter {
     my ($self, $key, $value) = @_;
-    if ($value) {
+    if (defined $value) {
         $self->{$key} = $value;
     }
     return $self->{$key};
@@ -92,7 +93,6 @@ sub parse_line {
         }
         elsif ( $line_type == 1 ) {
             $self->parse_sub_file_reference( $rest );
-            $self->invert( 0 );
         }
         elsif ( $line_type == 2 ) {
             $self->parse_line_command( $rest );
@@ -127,10 +127,24 @@ sub handle_bfc_command {
 
     my $first = shift @items;
 
-    if ( $first && $first eq 'INVERTNEXT' ) {
-        $self->invert(1);
-        $self->DEBUG('handle_bfc_command(): inverted model');
+    if (!$first) {
+        $self->DEBUG('META: invalid BFC');
+        return;
     }
+    if ($first eq 'INVERTNEXT') {
+        $self->{_invertnext} = 1;
+        $self->DEBUG('META: INVERTNEXT found while invert[%d]', $self->invert);
+        return;
+    }
+    if ($first eq 'CERTIFY') {
+        if (!$items[0]) {
+            $self->DEBUG('META: CERTIFY with no winding - default CCW');
+            return;
+        }
+        #$self->DEBUG('META: BFC CERTIFY %s', $items[0]);
+        return;
+    }
+    $self->DEBUG('META: Unknown BFC: %s', $items[0]);
 }
 
 sub parse_sub_file_reference {
@@ -193,23 +207,34 @@ sub parse_sub_file_reference {
         return;
     }
 
-    $self->DEBUG('parse_sub_file_reference(): parsing subfile "%s" with inverted: %d', $subpart_filename, $self->invert);
+    my $det = mat4determinant($mat);
+    my $invert = $self->invert;
+    $self->DEBUG('FILE: %s BEFORE det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
+    if ($det < 0) {
+        $invert = 1;
+    }
+    elsif ($self->{_invertnext}) {
+        $invert = $invert ? 0 : 1;
+    }
+    $self->DEBUG('FILE: %s AFTER  det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
+
     my $subparser = __PACKAGE__->new( {
         file       => $subpart_filename,
         ldraw_path => $self->ldraw_path,
         debug      => $self->debug,
+        invert     => $invert,
         d_indent   => $self->d_indent + 2,
     } );
     $subparser->parse;
+    $self->{_invertnext} = 0;
 
     for my $triangle ( @{ $subparser->{triangles} } ) {
         for my $vec ( @{ $triangle } ) {
-            my @new_vec = max4xv3( $mat, $vec );
+            my @new_vec = mat4xv3( $mat, $vec );
             $vec->[0] = $new_vec[0];
             $vec->[1] = $new_vec[1];
             $vec->[2] = $new_vec[2];
         }
-        $triangle->[4] = [ $self->calc_surface_normal($triangle->[0], $triangle->[1], $triangle->[2]) ];
         push @{ $self->{triangles} }, $triangle;
     }
 }
@@ -223,11 +248,20 @@ sub parse_triange_command {
     # 16 8.9 -10 58.73 6.36 -10 53.64 9 -10 55.5
     my @items = split( /\s+/, $rest );
     my $color = shift @items;
-    my $p1 = [ $items[0], $items[1], $items[2] ];
-    my $p2 = [ $items[3], $items[4], $items[5] ];
-    my $p3 = [ $items[6], $items[7], $items[8] ];
-    my $n = [ $self->calc_surface_normal( $p1, $p2, $p3 ) ];
-    push @{ $self->{triangles} }, [ $p1, $p2, $p3, $n ];
+    if ($self->invert) {
+        $self->_add_triangle([
+            [$items[0], $items[1], $items[2]],
+            [$items[6], $items[7], $items[8]],
+            [$items[3], $items[4], $items[5]],
+        ]);
+    }
+    else {
+        $self->_add_triangle([
+            [$items[0], $items[1], $items[2]],
+            [$items[3], $items[4], $items[5]],
+            [$items[6], $items[7], $items[8]],
+        ]);
+    }
 }
 
 sub parse_quadrilateral_command {
@@ -247,35 +281,36 @@ sub parse_quadrilateral_command {
     my $x4 = shift @items;
     my $y4 = shift @items;
     my $z4 = shift @items;
-    my $na = [ $self->calc_surface_normal( [ $x1, $y1, $z1 ], [ $x2, $y2, $z2 ], [ $x3, $y3, $z3 ] ) ];
-    my $nb = [ $self->calc_surface_normal( [ $x3, $y3, $z3 ], [ $x4, $y4, $z4 ], [ $x1, $y1, $z1 ] ) ];
-    push @{ $self->{triangles} }, [
-        [ $x1, $y1, $z1 ],
-        [ $x2, $y2, $z2 ],
-        [ $x3, $y3, $z3 ],
-        $na,
-    ];
-    push @{ $self->{triangles} }, [
-        [ $x3, $y3, $z3 ],
-        [ $x4, $y4, $z4 ],
-        [ $x1, $y1, $z1 ],
-        $nb,
-    ];
+    if ($self->invert) {
+        $self->_add_triangle([
+            [$x1, $y1, $z1],
+            [$x3, $y3, $z3],
+            [$x2, $y2, $z2],
+        ]);
+        $self->_add_triangle([
+            [$x3, $y3, $z3],
+            [$x1, $y1, $z1],
+            [$x4, $y4, $z4],
+        ]);
+    }
+    else {
+        $self->_add_triangle([
+            [$x1, $y1, $z1],
+            [$x2, $y2, $z2],
+            [$x3, $y3, $z3],
+        ]);
+        $self->_add_triangle([
+            [$x3, $y3, $z3],
+            [$x4, $y4, $z4],
+            [$x1, $y1, $z1],
+        ]);
+    }
 }
 
-sub WTF_parse_quadrilateral_command {
-    my ( $self, $rest ) = @_;
-    # 16 1.27 10 68.9 -6.363 10 66.363 10.6 10 79.2 7.1 10 73.27
-    my @items = split( /\s+/, $rest );
-    my $color = shift @items;
-    my $p1 = [ $items[0], $items[1], $items[2] ];
-    my $p2 = [ $items[3], $items[4], $items[5] ];
-    my $p3 = [ $items[6], $items[7], $items[8] ];
-    my $p4 = [ $items[9], $items[10], $items[11] ];
-    my $na = [ $self->calc_surface_normal( $p1, $p2, $p3 ) ];
-    my $nb = [ $self->calc_surface_normal( $p3, $p4, $p1 ) ];
-    push @{ $self->{triangles} }, [ $p1, $p2, $p3, $na ];
-    push @{ $self->{triangles} }, [ $p3, $p4, $p1, $nb ];
+sub _add_triangle {
+    my ($self, $points) = @_;
+    $points->[3] = $self->calc_surface_normal($points);
+    push @{$self->{triangles}}, $points;
 }
 
 sub parse_optional {
@@ -283,12 +318,8 @@ sub parse_optional {
 }
 
 sub calc_surface_normal {
-    my ( $self, $ip1, $ip2, $ip3 ) = @_;
-
-    my ( $p1, $p2, $p3 ) = ( $ip1, $ip2, $ip3 );
-    if ( $self->invert ) {
-        ( $p1, $p2, $p3 ) = ( $ip1, $ip3, $ip2 );
-    }
+    my ($self, $points) = @_;
+    my ($p1, $p2, $p3) = ($points->[0], $points->[1], $points->[2]);
 
     my ( $N, $U, $V ) = ( [], [], [] );
 
@@ -304,10 +335,10 @@ sub calc_surface_normal {
     $N->[Y] = $U->[Z] * $V->[X] - $U->[X] * $V->[Z];
     $N->[Z] = $U->[X] * $V->[Y] - $U->[Y] * $V->[X];
 
-    return ( $N->[X], $N->[Y], $N->[Z] );
+    return [$N->[X], $N->[Y], $N->[Z]];
 }
 
-sub max4xv3 {
+sub mat4xv3 {
     my ( $mat, $vec ) = @_;
 
     my ( $a1, $a2, $a3, $a4,
@@ -321,6 +352,40 @@ sub max4xv3 {
     my $z_new = $c1 * $x_old + $c2 * $y_old + $c3 * $z_old + $c4;
 
     return ( $x_new, $y_new, $z_new );
+}
+
+sub mat4determinant {
+    my ($mat) = @_;
+    my $a00 = $mat->[0];
+    my $a01 = $mat->[1];
+    my $a02 = $mat->[2];
+    my $a03 = $mat->[3];
+    my $a10 = $mat->[4];
+    my $a11 = $mat->[5];
+    my $a12 = $mat->[6];
+    my $a13 = $mat->[7];
+    my $a20 = $mat->[8];
+    my $a21 = $mat->[9];
+    my $a22 = $mat->[10];
+    my $a23 = $mat->[11];
+    my $a30 = $mat->[12];
+    my $a31 = $mat->[13];
+    my $a32 = $mat->[14];
+    my $a33 = $mat->[15];
+    my $b00 = $a00 * $a11 - $a01 * $a10;
+    my $b01 = $a00 * $a12 - $a02 * $a10;
+    my $b02 = $a00 * $a13 - $a03 * $a10;
+    my $b03 = $a01 * $a12 - $a02 * $a11;
+    my $b04 = $a01 * $a13 - $a03 * $a11;
+    my $b05 = $a02 * $a13 - $a03 * $a12;
+    my $b06 = $a20 * $a31 - $a21 * $a30;
+    my $b07 = $a20 * $a32 - $a22 * $a30;
+    my $b08 = $a20 * $a33 - $a23 * $a30;
+    my $b09 = $a21 * $a32 - $a22 * $a31;
+    my $b10 = $a21 * $a33 - $a23 * $a31;
+    my $b11 = $a22 * $a33 - $a23 * $a32;
+
+    return $b00 * $b11 - $b01 * $b10 + $b02 * $b09 + $b03 * $b08 - $b04 * $b07 + $b05 * $b06;
 }
 
 sub to_stl {
@@ -350,3 +415,90 @@ sub to_stl {
 }
 
 1;
+
+__DATA__
+
+## In handler for "!LDRAW":
+
+    // If the scale of the object is negated then the triangle winding order
+    // needs to be flipped.
+    var matrix = currentParseScope.matrix;
+    if (
+        matrix.determinant() < 0 && (
+            scope.separateObjects && isPrimitiveType( type ) ||
+            ! scope.separateObjects
+        ) ) {
+
+        currentParseScope.inverted = ! currentParseScope.inverted;
+
+    }
+
+    triangles = currentParseScope.triangles;
+    lineSegments = currentParseScope.lineSegments;
+    conditionalSegments = currentParseScope.conditionalSegments;
+
+    break;
+
+## Handling sub-file:
+
+    // Line type 1: Sub-object file
+    case '1':
+
+        var material = parseColourCode( lp );
+
+        var posX = parseFloat( lp.getToken() );
+        var posY = parseFloat( lp.getToken() );
+        var posZ = parseFloat( lp.getToken() );
+        var m0 = parseFloat( lp.getToken() );
+        var m1 = parseFloat( lp.getToken() );
+        var m2 = parseFloat( lp.getToken() );
+        var m3 = parseFloat( lp.getToken() );
+        var m4 = parseFloat( lp.getToken() );
+        var m5 = parseFloat( lp.getToken() );
+        var m6 = parseFloat( lp.getToken() );
+        var m7 = parseFloat( lp.getToken() );
+        var m8 = parseFloat( lp.getToken() );
+
+        var matrix = new Matrix4().set(
+            m0, m1, m2, posX,
+            m3, m4, m5, posY,
+            m6, m7, m8, posZ,
+            0, 0, 0, 1
+        );
+
+        var fileName = lp.getRemainingString().trim().replace( /\\/g, "/" );
+
+        if ( scope.fileMap[ fileName ] ) {
+
+            // Found the subobject path in the preloaded file path map
+            fileName = scope.fileMap[ fileName ];
+
+        }    else {
+
+            // Standardized subfolders
+            if ( fileName.startsWith( 's/' ) ) {
+
+                fileName = 'parts/' + fileName;
+
+            } else if ( fileName.startsWith( '48/' ) ) {
+
+                fileName = 'p/' + fileName;
+
+            }
+
+        }
+
+        subobjects.push( {
+            material: material,
+            matrix: matrix,
+            fileName: fileName,
+            originalFileName: fileName,
+            locationState: LDrawLoader.FILE_LOCATION_AS_IS,
+            url: null,
+            triedLowerCase: false,
+            inverted: bfcInverted !== currentParseScope.inverted,
+            startingConstructionStep: startingConstructionStep
+        } );
+
+        bfcInverted = false;
+
