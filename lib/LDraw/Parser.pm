@@ -213,7 +213,7 @@ sub parse_sub_file_reference {
     if ($det < 0) {
         $invert = 1;
     }
-    elsif ($self->{_invertnext}) {
+    if ($self->{_invertnext}) {
         $invert = $invert ? 0 : 1;
     }
     $self->DEBUG('FILE: %s AFTER  det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
