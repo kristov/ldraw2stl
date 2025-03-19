@@ -2,6 +2,28 @@ package LDraw::Parser;
 
 use strict;
 use warnings;
+use File::Spec;
+
+# A meta command is a comment line (type 0) followed by some magic. Unfortunately, being a
+# comment line it can also be followed by regular old comments. Here are some common words
+# that are the first word in a comment line, which are not meta commands we need to
+# consider.
+#
+my @META_IGNORE = (
+    "Hi-Res",
+    "Name:",
+    "Author:",
+    "!LDRAW_ORG",
+    "!LICENSE",
+    "!HISTORY",
+    "Technic",
+    "Box",
+    "Cylinder",
+    "Peg",
+    "Rectangle",
+    "Stud",
+);
+my %MI = map {lc($_) => 1} @META_IGNORE;
 
 sub new {
     my ($class, $args) = @_;
@@ -52,13 +74,23 @@ use constant Y => 1;
 use constant Z => 2;
 
 sub DEBUG {
-    my ( $self, $message, @args) = @_;
+    my ($self, $message, @args) = @_;
     return if !$self->debug;
     my $indent = " " x $self->d_indent;
-    if ( @args ) {
+    if (@args) {
         $message = sprintf($message, @args);
     }
-    print STDERR sprintf("%s%s\n", $indent, $message);
+    print STDERR sprintf("%sDEBUG: %s\n", $indent, $message);
+}
+
+sub WARN {
+    my ($self, $class, $message, @args) = @_;
+    my $indent = " " x $self->d_indent;
+    if (@args) {
+        $message = sprintf($message, @args);
+    }
+    $self->{_warn_classes}->{$class}++;
+    print STDERR sprintf("%sWARN: [%s] %s\n", $indent, $class, $message);
 }
 
 sub parse {
@@ -81,8 +113,11 @@ sub parse_handle {
     }
 }
 
+# Lines start with a line type, which is an integer. The type defines the format of the
+# rest of the line.
+#
 sub parse_line {
-    my ( $self, $line ) = @_;
+    my ($self, $line) = @_;
 
     $line =~ s/^\s+//;
 
@@ -107,23 +142,45 @@ sub parse_line {
             $self->parse_optional( $rest );
         }
         else {
-            warn "unhandled line type: $line_type";
+            $self->WARN("UNKNOWN_LINE_TYPE", "unhandled line type: %s", $line_type);
         }
     }
 }
 
+# Comments can usually be ignored, except for the "BFC" meta command. This is used to
+# define the winding order of triangles in the file (Back Face Culling).
+#
+# "Changing the winding setting will only affect the current file. It will not modify the
+# winding of subfiles."
+#
+# I need to check this, because I think my logic might be flawed here.
+#
 sub parse_comment_or_meta {
-    my ( $self, $rest ) = @_;
-    my @items = split( /\s+/, $rest );
+    my ($self, $rest) = @_;
+    my @items = split(/\s+/, $rest);
     my $first = shift @items;
 
-    if ( $first && $first eq 'BFC' ) {
-        $self->handle_bfc_command( @items );
+    if (!$first) {
+        return;
     }
+    if ($first eq '//') {
+        # The form 0 // <comment> is preferred as the // marker clearly indicates that the
+        # line is a comment, thereby permitting parsers to stop processing the line. The
+        # form 0 <comment> is deprecated. 
+        return;
+    }
+    if ($MI{lc($first)}) {
+        return;
+    }
+    if ($first eq 'BFC') {
+        $self->handle_bfc_command(@items);
+        return;
+    }
+    #$self->WARN("UNKNOWN_META", "unknown meta command: %s", $first);
 }
 
 sub handle_bfc_command {
-    my ( $self, @items ) = @_;
+    my ($self, @items) = @_;
 
     my $first = shift @items;
 
@@ -133,7 +190,7 @@ sub handle_bfc_command {
     }
     if ($first eq 'INVERTNEXT') {
         $self->{_invertnext} = 1;
-        $self->DEBUG('META: INVERTNEXT found while invert[%d]', $self->invert);
+        #$self->DEBUG('META: INVERTNEXT found while invert[%d]', $self->invert);
         return;
     }
     if ($first eq 'CERTIFY') {
@@ -147,10 +204,17 @@ sub handle_bfc_command {
     $self->DEBUG('META: Unknown BFC: %s', $items[0]);
 }
 
+# A sub-file reference is a shape described in another file, placed in a certain location
+# in the model. Note: this is recursive, so sub-files can contain references to other
+# sub-files. The first number is a color (ignored) followed by a 3x3 translation matrix
+# for how to position the sub-file shape within the model. This matrix encodes rotation
+# and translation, and is converted here into a 4x4 matrix with "identity" set for the
+# skew part of the matrix.
+#
 sub parse_sub_file_reference {
-    my ( $self, $rest ) = @_;
+    my ($self, $rest) = @_;
     # 16 0 -10 0 9 0 0 0 1 0 0 0 -9 2-4edge.dat
-    my @items = split( /\s+/, $rest );
+    my @items = split(/\s+/, $rest);
     my $color = shift @items;
     my $x = shift @items;
     my $y = shift @items;
@@ -165,10 +229,11 @@ sub parse_sub_file_reference {
     my $h = shift @items;
     my $i = shift @items;
 
-#    / a d g 0 \   / a b c x \
-#    | b e h 0 |   | d e f y |
-#    | c f i 0 |   | g h i z |
-#    \ x y z 1 /   \ 0 0 0 1 /
+    # Possible "shapes" of the matrix. The correct is the one on the right (
+    #    / a d g 0 \   / a b c x \
+    #    | b e h 0 |   | d e f y |
+    #    | c f i 0 |   | g h i z |
+    #    \ x y z 1 /   \ 0 0 0 1 /
 
     my $mat = [
         $a, $b, $c, $x,
@@ -177,29 +242,40 @@ sub parse_sub_file_reference {
         0, 0, 0, 1,
     ];
 
-    if ( scalar( @items ) != 1 ) {
+    if (scalar(@items) != 1) {
         warn "um, filename is made up of multiple parts (or none)";
     }
 
-    my $filename = lc( $items[0] );
+    my $filename = lc($items[0]);
     $filename =~ s/\\/\//g;
 
-    my $p_filename = join( '/', $self->ldraw_path, 'p', $filename );
-    my $hires_filename = join( '/', $self->ldraw_path, 'p/48', $filename );
-    my $parts_filename = join( '/', $self->ldraw_path, 'parts', $filename );
-    my $models_filename = join( '/', $self->ldraw_path, 'models', $filename );
+    # This is the layout of the ldraw library:
+    #
+    #   ldraw
+    #   ├── models
+    #   ├── p
+    #   │   ├── 48
+    #   │   └── 8
+    #   └── parts
+    #       ├── s
+    #       └── textures
+    #
+    my $p_filename = File::Spec->catfile($self->ldraw_path, 'p', $filename);
+    my $hires_filename = File::Spec->catfile($self->ldraw_path, 'p', '48', $filename);
+    my $parts_filename = File::Spec->catfile($self->ldraw_path, 'parts', $filename);
+    my $models_filename = File::Spec->catfile($self->ldraw_path, 'models', $filename);
 
     my $subpart_filename;
-    if ( -e $hires_filename ) {
+    if (-e $hires_filename) {
         $subpart_filename = $hires_filename;
     }
-    elsif ( -e $p_filename ) {
+    elsif (-e $p_filename) {
         $subpart_filename = $p_filename;
     }
-    elsif (-e $parts_filename ) {
+    elsif (-e $parts_filename) {
         $subpart_filename = $parts_filename;
     }
-    elsif ( -e $models_filename ) {
+    elsif (-e $models_filename) {
         $subpart_filename = $models_filename;
     }
     else {
@@ -209,14 +285,18 @@ sub parse_sub_file_reference {
 
     my $det = mat4determinant($mat);
     my $invert = $self->invert;
-    $self->DEBUG('FILE: %s BEFORE det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
+    #$self->DEBUG('FILE: %s BEFORE det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
+
+    # This logic around the `invert`, `_invertnext` and matrix determinant needs to be
+    # figured out properly.
+    #
     if ($det < 0) {
         $invert = 1;
     }
     if ($self->{_invertnext}) {
         $invert = $invert ? 0 : 1;
     }
-    $self->DEBUG('FILE: %s AFTER  det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
+    #$self->DEBUG('FILE: %s AFTER  det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
 
     my $subparser = __PACKAGE__->new( {
         file       => $subpart_filename,

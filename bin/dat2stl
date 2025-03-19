@@ -15,14 +15,20 @@ GetOptions(
     'ldrawdir=s',
     'file=s',
     'debug',
+    'nomodel',
 );
 
-if ( $opts->{help} ) {
+if (!keys %{$opts}) {
     print_usage();
     exit 0;
 }
 
-if ( !$opts->{file} ) {
+if ($opts->{help}) {
+    print_usage();
+    exit 0;
+}
+
+if (!$opts->{file}) {
     print "ERROR: --file is required! (try --help)\n";
     exit 1;
 }
@@ -50,6 +56,10 @@ Takes an ldraw part .dat file as input and converts it into an STL file.
     --debug
         Print debugging messages to STDERR
 
+    --nomodel
+        Do not print the stl output. I am using this to run the script over all
+        parts to try to detect issues.
+
 END
 }
 
@@ -61,4 +71,7 @@ my $parser = LDraw::Parser->new( {
 } );
 
 $parser->parse;
+if ($opts->{nomodel}) {
+    exit 0;
+}
 print $parser->to_stl;
