@@ -2,9 +2,9 @@
 
 Convert LEGO LDraw files to STL, for super-sizing and 3d printing!!
 
-1) Get the ldraw parts archive at [](http://www.ldraw.org/article/13.html):
+1) Locate the ldraw parts archive at [getting started](https://www.ldraw.org/help/getting-started.html) (note: the `wget` link below might go stale):
 
-    wget http://www.ldraw.org/library/updates/complete.zip
+    wget https://library.ldraw.org/library/updates/complete.zip
     unzip complete.zip
     bin/dat2stl --file ldraw/parts/3894.dat --ldrawdir ./ldraw
 
