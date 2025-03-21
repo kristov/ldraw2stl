@@ -15,7 +15,9 @@ GetOptions(
     'ldrawdir=s',
     'file=s',
     'debug',
+    'json',
     'nomodel',
+    'invert',
 );
 
 if (!keys %{$opts}) {
@@ -56,21 +58,44 @@ Takes an ldraw part .dat file as input and converts it into an STL file.
     --debug
         Print debugging messages to STDERR
 
+    --json
+        Dump the model as a json object in the form:
+
+            {"normals":[],"vertexes":[]}
+
+        Note: the surface normal of the triangle is duplicated for each of the 3 vertexes
+        in the triangle, so these can be loaded into GL buffers and rendered with
+        glDrawArrays.
+
     --nomodel
         Do not print the stl output. I am using this to run the script over all
         parts to try to detect issues.
 
+    --invert
+        Invert the part. Used for debugging.
+
 END
 }
 
-my $parser = LDraw::Parser->new( {
+my $parser = LDraw::Parser->new({
     file => $opts->{file},
     $opts->{scale} ? ( scale => $opts->{scale} ) : (),
     $opts->{ldrawdir} ? ( ldraw_path => $opts->{ldrawdir} ) : (),
     $opts->{debug} ? ( debug => 1 ) : (),
-} );
+    $opts->{invert} ? ( invert => 1 ) : (),
+});
 
 $parser->parse;
+if ($opts->{json}) {
+    my $data = $parser->gl_buffer;
+    print '{"normals":[';
+    print join(',', @{$data->{normals}});
+    print '],"vertexes":[';
+    print join(',', @{$data->{vertexes}});
+    print ']}';
+    print "\n";
+    exit 0;
+}
 if ($opts->{nomodel}) {
     exit 0;
 }

@@ -36,6 +36,7 @@ sub new {
         invert => $args->{invert} // 0,
         debug => $args->{debug} // 0,
         d_indent => $args->{d_indent} // 0,
+        ccw_winding => 1,
         _invertnext => 0,
     }, $class);
 }
@@ -62,6 +63,9 @@ sub mm_per_ldu { return shift->_getter_setter('mm_per_ldu', @_); }
 
 # Invert this part
 sub invert { return shift->_getter_setter('invert', @_); }
+
+# Specify the winding order of triangles in this part
+sub ccw_winding { return shift->_getter_setter('ccw_winding', @_); }
 
 # Print debugging messages to stderr
 sub debug { return shift->_getter_setter('debug', @_); }
@@ -111,6 +115,58 @@ sub parse_handle {
         chomp $line;
         $self->parse_line( $line );
     }
+}
+
+# The BFC CERTIFY [CCW|CW] meta command determines the winding. But if we are inverting
+# the part, we have to invert this winding.
+#
+sub use_ccw_winding {
+    my ($self) = @_;
+    return ($self->invert) ? !$self->ccw_winding : $self->ccw_winding;
+}
+
+# The default winding of triangles is CCW (Counter ClockWise). A triangle wound CCW on the
+# X,Y plane will have it's normal vector pointing in the positive Z direction. This is
+# usually towards the screen, so likely towards a light source. By default, all ldraw
+# geometry is wound CCW, and this is made explicit by the meta command:
+#
+#   0 BFC CERTIFIED CCW
+#
+# However, a part file may change this winding order by using "BFC CERTIFIED CW". This
+# will flip the normal vector to be pointing in the other direction. For example, if we
+# are generating the inside surface of a tube rather than the outside.
+#
+# The "invert" parameter changes this winding for a part. So if the part is CCW, the
+# invert param flips this to CW. This inversion is "sticky", meaning it will be applied to
+# a part and all it's sub-parts, until the inversion rule is flipped.
+#
+# The inversion rule is flipped under two circumstances: 1. An "INVERTNEXT" BFC meta
+# command is seen, and 2. If this code detects there is a reflection transformation.
+#
+# The "INVERTNEXT" meta command in theory applies to the next line in a file, however in
+# this code it only affects the next sub-part (parse_sub_file_reference). I have yet to
+# see it be applied to a triangle or quad line.
+#
+# A reflection transformation will flip the winding order of the triangles. Therefore, the
+# invert param is set so that the sub-part is generated with the inverted winding. When
+# the reflection transformation is applied, the winding is set back to the expected
+# winding for the sub-part.
+#
+sub compute_inversion {
+    my ($self, $mat) = @_;
+
+    # Use the passed invert state, unless we are doing an INVERTNEXT
+    my $invert = ($self->{_invertnext}) ? !$self->invert : $self->invert;
+
+    # A negative determinant means there is some form or reflection happening. When this
+    # matrix is applied to the vertexes of the sub-part, the winding order of the vertexes
+    # is reversed. So if we detect a negative determinant, we have to flip the winding
+    # order of the sub-part so that when this matrix is applied the original intended
+    # winding is preserved.
+    my $det = mat4determinant($mat);
+    $invert = ($det < 0) ? !$invert : $invert;
+
+    return $invert;
 }
 
 # Lines start with a line type, which is an integer. The type defines the format of the
@@ -190,15 +246,18 @@ sub handle_bfc_command {
     }
     if ($first eq 'INVERTNEXT') {
         $self->{_invertnext} = 1;
-        #$self->DEBUG('META: INVERTNEXT found while invert[%d]', $self->invert);
+        $self->DEBUG('META: INVERTNEXT found while invert[%d]', $self->invert);
         return;
     }
     if ($first eq 'CERTIFY') {
-        if (!$items[0]) {
+        my $winding = $items[0];
+        if (!$winding) {
             $self->DEBUG('META: CERTIFY with no winding - default CCW');
             return;
         }
-        #$self->DEBUG('META: BFC CERTIFY %s', $items[0]);
+        if ($winding eq 'CW') {
+            $self->ccw_winding(0);
+        }
         return;
     }
     $self->DEBUG('META: Unknown BFC: %s', $items[0]);
@@ -229,11 +288,14 @@ sub parse_sub_file_reference {
     my $h = shift @items;
     my $i = shift @items;
 
-    # Possible "shapes" of the matrix. The correct is the one on the right (
-    #    / a d g 0 \   / a b c x \
-    #    | b e h 0 |   | d e f y |
-    #    | c f i 0 |   | g h i z |
-    #    \ x y z 1 /   \ 0 0 0 1 /
+    # The form of this matrix is:
+    #
+    #   / a b c x \
+    #   | d e f y |
+    #   | g h i z |
+    #   \ 0 0 0 1 /
+    #
+    # Note: The x,y,z translation part are the first 3 arguments.
 
     my $mat = [
         $a, $b, $c, $x,
@@ -260,10 +322,29 @@ sub parse_sub_file_reference {
     #       ├── s
     #       └── textures
     #
+    # From the Readme.txt file:
+    #
+    #  \MODELS\     -  This directory is where your model .dat files are stored.
+    #                  There are two sample model .dat files installed for you
+    #                  to look at - Car.dat and Pyramid.dat.
+    #  \P\          -  This directory is where parts primitives are located.
+    #                  Parts primitives are tyically highly reusable components
+    #                  used by the part files in the LDraw library.
+    #  \P\48\       -  This directory is where high resolution parts primitives
+    #                  are located. These are typically used for large curved
+    #                  parts where excessive scaling of the regular curved
+    #                  primitives would produce an undesriable result.
+    #  \PARTS\      -  This directory holds all the actual parts that can be used
+    #                  in creating or rendering your models.  A list of these
+    #                  parts can be seen by viewing the parts.lst file.
+    #  \PARTS\S\    -  This directory holds sub-parts that are used by the LDraw
+    #                  parts to optimise file size and improve parts development
+    #                  efficiancy.
+    #
     my $p_filename = File::Spec->catfile($self->ldraw_path, 'p', $filename);
     my $hires_filename = File::Spec->catfile($self->ldraw_path, 'p', '48', $filename);
     my $parts_filename = File::Spec->catfile($self->ldraw_path, 'parts', $filename);
-    my $models_filename = File::Spec->catfile($self->ldraw_path, 'models', $filename);
+    my $parts_s_filename = File::Spec->catfile($self->ldraw_path, 'parts', 's', $filename);
 
     my $subpart_filename;
     if (-e $hires_filename) {
@@ -275,34 +356,19 @@ sub parse_sub_file_reference {
     elsif (-e $parts_filename) {
         $subpart_filename = $parts_filename;
     }
-    elsif (-e $models_filename) {
-        $subpart_filename = $models_filename;
+    elsif (-e $parts_s_filename) {
+        $subpart_filename = $parts_s_filename;
     }
     else {
         warn "unable to find file: $filename in normal paths";
         return;
     }
 
-    my $det = mat4determinant($mat);
-    my $invert = $self->invert;
-    #$self->DEBUG('FILE: %s BEFORE det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
-
-    # This logic around the `invert`, `_invertnext` and matrix determinant needs to be
-    # figured out properly.
-    #
-    if ($det < 0) {
-        $invert = 1;
-    }
-    if ($self->{_invertnext}) {
-        $invert = $invert ? 0 : 1;
-    }
-    #$self->DEBUG('FILE: %s AFTER  det[%d], invert[%d] _invertnext[%d]', $subpart_filename, $det, $invert, $self->{_invertnext});
-
     my $subparser = __PACKAGE__->new( {
         file       => $subpart_filename,
         ldraw_path => $self->ldraw_path,
         debug      => $self->debug,
-        invert     => $invert,
+        invert     => $self->compute_inversion($mat),
         d_indent   => $self->d_indent + 2,
     } );
     $subparser->parse;
@@ -319,7 +385,16 @@ sub parse_sub_file_reference {
     }
 }
 
+# Lines are used for outlining the model so it is easier to see edges. Because we are
+# generating data for an STL we don't need lines.
 sub parse_line_command {
+    my ( $self, $rest ) = @_;
+}
+
+# Optional lines are strange things, but they appear to be about not drawing lines that
+# are occluded by the model. I think. Regardless, we don't need lines or optional lines
+# for STL generation.
+sub parse_optional {
     my ( $self, $rest ) = @_;
 }
 
@@ -328,18 +403,18 @@ sub parse_triange_command {
     # 16 8.9 -10 58.73 6.36 -10 53.64 9 -10 55.5
     my @items = split( /\s+/, $rest );
     my $color = shift @items;
-    if ($self->invert) {
+    if ($self->use_ccw_winding) {
         $self->_add_triangle([
             [$items[0], $items[1], $items[2]],
-            [$items[6], $items[7], $items[8]],
             [$items[3], $items[4], $items[5]],
+            [$items[6], $items[7], $items[8]],
         ]);
     }
     else {
         $self->_add_triangle([
             [$items[0], $items[1], $items[2]],
-            [$items[3], $items[4], $items[5]],
             [$items[6], $items[7], $items[8]],
+            [$items[3], $items[4], $items[5]],
         ]);
     }
 }
@@ -361,77 +436,84 @@ sub parse_quadrilateral_command {
     my $x4 = shift @items;
     my $y4 = shift @items;
     my $z4 = shift @items;
-    if ($self->invert) {
+    if ($self->use_ccw_winding) {
         $self->_add_triangle([
             [$x1, $y1, $z1],
-            [$x3, $y3, $z3],
             [$x2, $y2, $z2],
+            [$x3, $y3, $z3],
         ]);
         $self->_add_triangle([
             [$x3, $y3, $z3],
-            [$x1, $y1, $z1],
             [$x4, $y4, $z4],
+            [$x1, $y1, $z1],
         ]);
     }
     else {
         $self->_add_triangle([
             [$x1, $y1, $z1],
-            [$x2, $y2, $z2],
             [$x3, $y3, $z3],
+            [$x2, $y2, $z2],
         ]);
         $self->_add_triangle([
             [$x3, $y3, $z3],
-            [$x4, $y4, $z4],
             [$x1, $y1, $z1],
+            [$x4, $y4, $z4],
         ]);
     }
 }
 
 sub _add_triangle {
     my ($self, $points) = @_;
-    $points->[3] = $self->calc_surface_normal($points);
     push @{$self->{triangles}}, $points;
-}
-
-sub parse_optional {
-    my ( $self, $rest ) = @_;
 }
 
 sub calc_surface_normal {
     my ($self, $points) = @_;
     my ($p1, $p2, $p3) = ($points->[0], $points->[1], $points->[2]);
 
-    my ( $N, $U, $V ) = ( [], [], [] );
+    my $U = [
+        $p2->[0] - $p1->[0],
+        $p2->[1] - $p1->[1],
+        $p2->[2] - $p1->[2],
+    ];
+    my $V = [
+        $p3->[0] - $p1->[0],
+        $p3->[1] - $p1->[1],
+        $p3->[2] - $p1->[2],
+    ];
 
-    $U->[X] = $p2->[X] - $p1->[X];
-    $U->[Y] = $p2->[Y] - $p1->[Y];
-    $U->[Z] = $p2->[Z] - $p1->[Z];
+    my $N = [
+        $U->[1] * $V->[2] - $U->[2] * $V->[1],
+        $U->[2] * $V->[0] - $U->[0] * $V->[2],
+        $U->[0] * $V->[1] - $U->[1] * $V->[0],
+    ];
 
-    $V->[X] = $p3->[X] - $p1->[X];
-    $V->[Y] = $p3->[Y] - $p1->[Y];
-    $V->[Z] = $p3->[Z] - $p1->[Z];
+    my $len = sqrt($N->[0] ** 2 + $N->[1] ** 2 + $N->[2] ** 2);
+    if ($len == 0) {
+        return [0, 0, 0];
+    }
 
-    $N->[X] = $U->[Y] * $V->[Z] - $U->[Z] * $V->[Y];
-    $N->[Y] = $U->[Z] * $V->[X] - $U->[X] * $V->[Z];
-    $N->[Z] = $U->[X] * $V->[Y] - $U->[Y] * $V->[X];
-
-    return [$N->[X], $N->[Y], $N->[Z]];
+    return [
+        $N->[0] / $len,
+        $N->[1] / $len,
+        $N->[2] / $len,
+    ];
 }
 
 sub mat4xv3 {
-    my ( $mat, $vec ) = @_;
+    my ($mat, $vec) = @_;
 
-    my ( $a1, $a2, $a3, $a4,
+    my ($a1, $a2, $a3, $a4,
          $b1, $b2, $b3, $b4,
-         $c1, $c2, $c3, $c4 ) = @{ $mat };
+         $c1, $c2, $c3, $c4) = @{$mat};
 
-    my ( $x_old, $y_old, $z_old ) = @{ $vec };
+    my ($u, $v, $z) = @{$vec};
 
-    my $x_new = $a1 * $x_old + $a2 * $y_old + $a3 * $z_old + $a4;
-    my $y_new = $b1 * $x_old + $b2 * $y_old + $b3 * $z_old + $b4;
-    my $z_new = $c1 * $x_old + $c2 * $y_old + $c3 * $z_old + $c4;
+    my $x_new = $a1 * $u + $a2 * $v + $a3 * $z + $a4;
+    my $y_new = $b1 * $u + $b2 * $v + $b3 * $z + $b4;
+    my $z_new = $c1 * $u + $c2 * $v + $c3 * $z + $c4;
 
-    return ( $x_new, $y_new, $z_new );
+    return ($x_new, $y_new, $z_new);
 }
 
 sub mat4determinant {
@@ -464,12 +546,16 @@ sub mat4determinant {
     my $b09 = $a21 * $a32 - $a22 * $a31;
     my $b10 = $a21 * $a33 - $a23 * $a31;
     my $b11 = $a22 * $a33 - $a23 * $a32;
-
     return $b00 * $b11 - $b01 * $b10 + $b02 * $b09 + $b03 * $b08 - $b04 * $b07 + $b05 * $b06;
 }
 
+sub _transvec {
+    my ($mm_per_ldu, $scale, $vec) = @_;
+    return [map {sprintf('%0.4f', $_ * $mm_per_ldu * $scale)} @{$vec}];
+}
+
 sub to_stl {
-    my ( $self ) = @_;
+    my ($self) = @_;
 
     my $scale = $self->scale || 1;
     my $mm_per_ldu = $self->mm_per_ldu;
@@ -477,13 +563,13 @@ sub to_stl {
     my $stl = "";
     $stl .= "solid GiantLegoRocks\n";
 
-    for my $triangle ( @{ $self->{triangles} } ) {
-        my ( $p1, $p2, $p3, $n ) = @{ $triangle };
-        $stl .= "facet normal " . join( ' ', map { sprintf( '%0.4f', $_ ) } @{ $n } ) . "\n";
+    for my $triangle (@{$self->{triangles}}) {
+        my ($p1, $p2, $p3) = map {_transvec($mm_per_ldu, $scale, $_)} @{$triangle};
+        my $n = $self->calc_surface_normal([$p1, $p2, $p3]);
+        $stl .= "facet normal " . join(' ', map {sprintf('%0.4f', $_)} @{$n}) . "\n";
         $stl .= "    outer loop\n";
-        for my $vec ( ( $p1, $p2, $p3 ) ) {
-            my @transvec = map { sprintf( '%0.4f', $_ ) } map { $_ * $mm_per_ldu * $scale } @{ $vec };
-            $stl .= "        vertex " . join( ' ', @transvec ) . "\n";
+        for my $vec (($p1, $p2, $p3)) {
+            $stl .= "        vertex " . join(' ', map {sprintf('%0.4f', $_)} @{$vec}) . "\n";
         }
         $stl .= "    endloop\n";
         $stl .= "endfacet\n";
@@ -494,91 +580,54 @@ sub to_stl {
     return $stl;
 }
 
-1;
+sub stl_buffer {
+    my ($self) = @_;
 
-__DATA__
+    my $scale = $self->scale || 1;
+    my $mm_per_ldu = $self->mm_per_ldu;
 
-## In handler for "!LDRAW":
-
-    // If the scale of the object is negated then the triangle winding order
-    // needs to be flipped.
-    var matrix = currentParseScope.matrix;
-    if (
-        matrix.determinant() < 0 && (
-            scope.separateObjects && isPrimitiveType( type ) ||
-            ! scope.separateObjects
-        ) ) {
-
-        currentParseScope.inverted = ! currentParseScope.inverted;
-
-    }
-
-    triangles = currentParseScope.triangles;
-    lineSegments = currentParseScope.lineSegments;
-    conditionalSegments = currentParseScope.conditionalSegments;
-
-    break;
-
-## Handling sub-file:
-
-    // Line type 1: Sub-object file
-    case '1':
-
-        var material = parseColourCode( lp );
-
-        var posX = parseFloat( lp.getToken() );
-        var posY = parseFloat( lp.getToken() );
-        var posZ = parseFloat( lp.getToken() );
-        var m0 = parseFloat( lp.getToken() );
-        var m1 = parseFloat( lp.getToken() );
-        var m2 = parseFloat( lp.getToken() );
-        var m3 = parseFloat( lp.getToken() );
-        var m4 = parseFloat( lp.getToken() );
-        var m5 = parseFloat( lp.getToken() );
-        var m6 = parseFloat( lp.getToken() );
-        var m7 = parseFloat( lp.getToken() );
-        var m8 = parseFloat( lp.getToken() );
-
-        var matrix = new Matrix4().set(
-            m0, m1, m2, posX,
-            m3, m4, m5, posY,
-            m6, m7, m8, posZ,
-            0, 0, 0, 1
-        );
-
-        var fileName = lp.getRemainingString().trim().replace( /\\/g, "/" );
-
-        if ( scope.fileMap[ fileName ] ) {
-
-            // Found the subobject path in the preloaded file path map
-            fileName = scope.fileMap[ fileName ];
-
-        }    else {
-
-            // Standardized subfolders
-            if ( fileName.startsWith( 's/' ) ) {
-
-                fileName = 'parts/' + fileName;
-
-            } else if ( fileName.startsWith( '48/' ) ) {
-
-                fileName = 'p/' + fileName;
-
-            }
-
+    my @facets;
+    for my $triangle (@{$self->{triangles}}) {
+        my ($p1, $p2, $p3) = map {_transvec($mm_per_ldu, $scale, $_)} @{$triangle};
+        my $n = $self->calc_surface_normal([$p1, $p2, $p3]);
+        my $facet = {
+            normal => [map {sprintf('%0.4f', $_)} @{$n}],
+            vertexes => [],
+        };
+        for my $vec (($p1, $p2, $p3)) {
+            push @{$facet->{vertexes}}, map {sprintf('%0.4f', $_)} @{$vec};
         }
+        push @facets, $facet;
+    }
+    return \@facets;
+}
 
-        subobjects.push( {
-            material: material,
-            matrix: matrix,
-            fileName: fileName,
-            originalFileName: fileName,
-            locationState: LDrawLoader.FILE_LOCATION_AS_IS,
-            url: null,
-            triedLowerCase: false,
-            inverted: bfcInverted !== currentParseScope.inverted,
-            startingConstructionStep: startingConstructionStep
-        } );
+sub gl_buffer {
+    my ($self) = @_;
 
-        bfcInverted = false;
+    my $scale = $self->scale || 1;
+    my $mm_per_ldu = $self->mm_per_ldu;
 
+    my @normals;
+    my @vertexes;
+    for my $triangle (@{$self->{triangles}}) {
+        my ($p1, $p2, $p3) = map {_transvec($mm_per_ldu, $scale, $_)} @{$triangle};
+        my $n = $self->calc_surface_normal([$p1, $p2, $p3]);
+        my @vertnorms = map {sprintf('%0.4f', $_)} @{$n};
+        # OpenGL requires an identical normal for each of the 3 vertexes in the triangle
+        # (usually anyway). We won't bother generating indexes, because this should be
+        # rendered using `glDrawArrays(GL_TRIANGLES, 0, n)`.
+        push @normals, @vertnorms;
+        push @normals, @vertnorms;
+        push @normals, @vertnorms;
+        for my $vec (($p1, $p2, $p3)) {
+            push @vertexes, map {sprintf('%0.4f', $_)} @{$vec};
+        }
+    }
+    return {
+        normals => \@normals,
+        vertexes => \@vertexes,
+    };
+}
+
+1;
