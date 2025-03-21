@@ -19,3 +19,11 @@ bin/dat2stl --file /usr/share/ldraw/parts/3894.dat --ldrawdir ./ldraw --scale 4 
 ```
 
 For a 4X scale one of those!
+
+## Windows users
+
+A user reported that they were able to get the tool to work on Windows using [Strawberry Perl](https://strawberryperl.com/). However, they encountered an issue that Powershell redirection under Windows will by default create a unicode file. Apparently STL readers interpret this as a binary file (because STL has both binary and ascii specifications) and fail to read it. To force ascii redirection use:
+
+```
+perl bin/dat2stl --file [part file] --ldrawdir [ldraw library] | Out-File -Encoding Ascii [output.stl]
+```
