@@ -30,6 +30,7 @@ sub new {
     die "file required" unless $args->{file};
     return bless({
         file => $args->{file},
+        cache => $args->{cache},
         ldraw_path => $args->{ldraw_path} // '/usr/share/ldraw',
         scale => $args->{scale} // 1,
         mm_per_ldu => $args->{mm_per_ldu} // 0.4,
@@ -38,6 +39,7 @@ sub new {
         d_indent => $args->{d_indent} // 0,
         ccw_winding => 1,
         _invertnext => 0,
+        triangles => [],
     }, $class);
 }
 
@@ -364,24 +366,37 @@ sub parse_sub_file_reference {
         return;
     }
 
-    my $subparser = __PACKAGE__->new( {
-        file       => $subpart_filename,
-        ldraw_path => $self->ldraw_path,
-        debug      => $self->debug,
-        invert     => $self->compute_inversion($mat),
-        d_indent   => $self->d_indent + 2,
-    } );
-    $subparser->parse;
+    my $triangles;
+    my $invert = $self->compute_inversion($mat);
+    if (defined $self->{cache}) {
+        $triangles = $self->{cache}->get($subpart_filename, $invert);
+    }
+    if (!$triangles) {
+        # Not using a cache, or cache miss
+        my $subparser = LDraw::Parser->new({
+            file       => $subpart_filename,
+            ldraw_path => $self->ldraw_path,
+            debug      => $self->debug,
+            invert     => $invert,
+            d_indent   => $self->d_indent + 2,
+            (defined $self->{cache}) ? (cache => $self->{cache}) : (),
+        });
+        $subparser->parse;
+        $triangles = $subparser->{triangles};
+        if (defined $self->{cache}) {
+            $self->{cache}->put($subpart_filename, $invert, $triangles);
+        }
+    }
     $self->{_invertnext} = 0;
 
-    for my $triangle ( @{ $subparser->{triangles} } ) {
-        for my $vec ( @{ $triangle } ) {
-            my @new_vec = mat4xv3( $mat, $vec );
-            $vec->[0] = $new_vec[0];
-            $vec->[1] = $new_vec[1];
-            $vec->[2] = $new_vec[2];
+    for my $triangle (@{$triangles}) {
+        my $n_triangle = [];
+        for my $vec (@{$triangle}) {
+            push @{$n_triangle}, mat4xv3($mat, $vec);
         }
-        push @{ $self->{triangles} }, $triangle;
+        push @{$self->{triangles}}, $n_triangle;
+#use Data::Dumper;
+#warn Dumper($self->{triangles});
     }
 }
 
@@ -513,7 +528,7 @@ sub mat4xv3 {
     my $y_new = $b1 * $u + $b2 * $v + $b3 * $z + $b4;
     my $z_new = $c1 * $u + $c2 * $v + $c3 * $z + $c4;
 
-    return ($x_new, $y_new, $z_new);
+    return [$x_new, $y_new, $z_new];
 }
 
 sub mat4determinant {
@@ -554,32 +569,6 @@ sub _transvec {
     return [map {sprintf('%0.4f', $_ * $mm_per_ldu * $scale)} @{$vec}];
 }
 
-sub to_stl {
-    my ($self) = @_;
-
-    my $scale = $self->scale || 1;
-    my $mm_per_ldu = $self->mm_per_ldu;
-
-    my $stl = "";
-    $stl .= "solid GiantLegoRocks\n";
-
-    for my $triangle (@{$self->{triangles}}) {
-        my ($p1, $p2, $p3) = map {_transvec($mm_per_ldu, $scale, $_)} @{$triangle};
-        my $n = $self->calc_surface_normal([$p1, $p2, $p3]);
-        $stl .= "facet normal " . join(' ', map {sprintf('%0.4f', $_)} @{$n}) . "\n";
-        $stl .= "    outer loop\n";
-        for my $vec (($p1, $p2, $p3)) {
-            $stl .= "        vertex " . join(' ', map {sprintf('%0.4f', $_)} @{$vec}) . "\n";
-        }
-        $stl .= "    endloop\n";
-        $stl .= "endfacet\n";
-    }
-
-    $stl .= "endsolid GiantLegoRocks\n";
-
-    return $stl;
-}
-
 sub stl_buffer {
     my ($self) = @_;
 
@@ -591,11 +580,11 @@ sub stl_buffer {
         my ($p1, $p2, $p3) = map {_transvec($mm_per_ldu, $scale, $_)} @{$triangle};
         my $n = $self->calc_surface_normal([$p1, $p2, $p3]);
         my $facet = {
-            normal => [map {sprintf('%0.4f', $_)} @{$n}],
+            normal => $n,
             vertexes => [],
         };
         for my $vec (($p1, $p2, $p3)) {
-            push @{$facet->{vertexes}}, map {sprintf('%0.4f', $_)} @{$vec};
+            push @{$facet->{vertexes}}, $vec;
         }
         push @facets, $facet;
     }
@@ -628,6 +617,32 @@ sub gl_buffer {
         normals => \@normals,
         vertexes => \@vertexes,
     };
+}
+
+package LDraw::Parser::Cache;
+
+sub new {
+    my ($class) = @_;
+    return bless({_cache => {}}, $class);
+}
+
+sub get {
+    my ($self, $file, $invert) = @_;
+    my $key = sprintf("%s__%d", $file, $invert);
+    if (defined $self->{_cache}->{$key}) {
+        return $self->{_cache}->{$key};
+    }
+    return;
+}
+
+sub put {
+    my ($self, $file, $invert, $trianges) = @_;
+    my $key = sprintf("%s__%d", $file, $invert);
+    if (defined $self->{_cache}->{$key}) {
+        die sprintf("repeated put for %s", $key);
+    }
+    $self->{_cache}->{$key} = $trianges;
+    return;
 }
 
 1;

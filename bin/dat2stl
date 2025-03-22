@@ -18,6 +18,7 @@ GetOptions(
     'json',
     'nomodel',
     'invert',
+    'cache',
 );
 
 if (!keys %{$opts}) {
@@ -74,16 +75,35 @@ Takes an ldraw part .dat file as input and converts it into an STL file.
     --invert
         Invert the part. Used for debugging.
 
+    --cache
+        Use a cache to avoid repeated geneneration of the same geometry. Many geometric
+        primitives are repeated (eg: a stud), and are simply translated into different
+        locations in the model. A combination of the sub-part name and the invert flag is
+        used to build a cache key to store the generated triangles for the sub-part. When
+        this is stable I will change this to --nocache so it's on by default.
+
 END
 }
 
-my $parser = LDraw::Parser->new({
+my $parser_opts = {
     file => $opts->{file},
-    $opts->{scale} ? ( scale => $opts->{scale} ) : (),
-    $opts->{ldrawdir} ? ( ldraw_path => $opts->{ldrawdir} ) : (),
-    $opts->{debug} ? ( debug => 1 ) : (),
-    $opts->{invert} ? ( invert => 1 ) : (),
-});
+};
+if ($opts->{cache}) {
+    $parser_opts->{cache} = LDraw::Parser::Cache->new;
+}
+if ($opts->{scale}) {
+    $parser_opts->{scale} = $opts->{scale};
+}
+if ($opts->{ldrawdir}) {
+    $parser_opts->{ldraw_path} = $opts->{ldrawdir};
+}
+if ($opts->{debug}) {
+    $parser_opts->{debug} = 1;
+}
+if ($opts->{invert}) {
+    $parser_opts->{invert} = 1;
+}
+my $parser = LDraw::Parser->new($parser_opts);
 
 $parser->parse;
 if ($opts->{json}) {
@@ -99,4 +119,15 @@ if ($opts->{json}) {
 if ($opts->{nomodel}) {
     exit 0;
 }
-print $parser->to_stl;
+my $facets = $parser->stl_buffer;
+printf("solid GiantLegoRocks\n");
+for my $facet (@{$facets}) {
+    printf("facet normal %0.4f %0.4f %0.4f\n", @{$facet->{normal}});
+    printf("    outer loop\n");
+    for my $vertex (@{$facet->{vertexes}}) {
+        printf("        vertex %0.4f %0.4f %0.4f\n", @{$vertex});
+    }
+    printf("    endloop\n");
+    printf("endfacet\n");
+}
+printf("endsolid GiantLegoRocks\n");
